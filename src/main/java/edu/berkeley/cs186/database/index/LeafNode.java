@@ -9,6 +9,7 @@ import edu.berkeley.cs186.database.memory.BufferManager;
 import edu.berkeley.cs186.database.memory.Page;
 import edu.berkeley.cs186.database.table.RecordId;
 
+import javax.management.openmbean.KeyAlreadyExistsException;
 import java.nio.ByteBuffer;
 import java.util.*;
 
@@ -37,6 +38,9 @@ class LeafNode extends BPlusNode {
 
     // The page on which this leaf is serialized.
     private Page page;
+
+
+    private float current_fill_factor = 0F;
 
     // The keys and record ids of this leaf. `keys` is always sorted in ascending
     // order. The record id at index i corresponds to the key at index i. For
@@ -146,24 +150,54 @@ class LeafNode extends BPlusNode {
     // See BPlusNode.get.
     @Override
     public LeafNode get(DataBox key) {
-        // TODO(proj2): implement
-
-        return null;
+        return this;
     }
 
     // See BPlusNode.getLeftmostLeaf.
     @Override
     public LeafNode getLeftmostLeaf() {
-        // TODO(proj2): implement
-
-        return null;
+        return this;
     }
 
     // See BPlusNode.put.
     @Override
     public Optional<Pair<DataBox, Long>> put(DataBox key, RecordId rid) {
-        // TODO(proj2): implement
+        //Case 1: key exists
+        if (keys.contains(key)) {
+            throw new BPlusTreeException("Key already exists!");
+        }
+        //Case 2: No overflow
+        int d = metadata.getOrder();
+        keys.add(key);
+        rids.add(rid);
+        Collections.sort(keys);
+        Collections.sort(rids);
 
+        if (keys.size() == (2*d)+1 ) { //Case 3: Overflow (copy up)
+            //Step 1: sort into right key splits
+            List<DataBox> left_keys = keys.subList(0, d);
+            List<DataBox> right_keys = keys.subList(d, (2*d)+1);  //second arg is exclusive
+            DataBox split_key = keys.get(d);
+
+            //Step 2: do the same for records
+            List<RecordId> left_rids = rids.subList(0, d);
+            List<RecordId> right_rids = rids.subList(d, (2*d)+1);
+
+            //Step 4: make a new leaf
+            LeafNode new_child = new LeafNode(metadata, bufferManager, right_keys, right_rids,rightSibling,treeContext);
+
+            //step 5: update old leaf??
+            keys = left_keys;
+            rids= left_rids;
+            rightSibling = Optional.of(new_child.getPage().getPageNum());
+
+            //Step 6: sync
+            sync();
+
+            //Step 7: return pair of split key and right node page number
+            return Optional.of(new Pair<>(split_key, new_child.getPage().getPageNum()));
+        }
+        sync();
         return Optional.empty();
     }
 
@@ -172,16 +206,59 @@ class LeafNode extends BPlusNode {
     public Optional<Pair<DataBox, Long>> bulkLoad(Iterator<Pair<DataBox, RecordId>> data,
             float fillFactor) {
         // TODO(proj2): implement
+        int d = metadata.getOrder();
+        while (data.hasNext()) {
+            Pair<DataBox, RecordId> entry = data.next();
+            DataBox  key = entry.getFirst();
+            RecordId rid = entry.getSecond();
 
+            if (keys.contains(key)) {
+                throw new BPlusTreeException("Key already exists!");
+            }
+            keys.add(key);
+            rids.add(rid);
+            Collections.sort(keys);
+            Collections.sort(rids);
+
+            current_fill_factor = keys.size()/(float)(2*d);
+
+            if(current_fill_factor > fillFactor){
+                int split = (int) (2*d*fillFactor);
+                List<DataBox> left_keys = keys.subList(0, split);
+                List<DataBox> right_keys = keys.subList(split, split + 1);  //second arg is exclusive
+                DataBox split_key = keys.get((int) (2*d*fillFactor));
+
+                //Step 2: do the same for records
+                List<RecordId> left_rids = rids.subList(0, split);
+                List<RecordId> right_rids = rids.subList(split, split + 1);
+
+                //Step 4: make a new leaf
+                LeafNode new_child = new LeafNode(metadata, bufferManager, right_keys, right_rids,rightSibling,treeContext);
+
+                //step 5: update old leaf
+                keys = left_keys;
+                rids= left_rids;
+                rightSibling = Optional.of(new_child.getPage().getPageNum());
+
+                //Step 6: sync
+                sync();
+
+                //Step 7: return pair of split key and right node page number
+                return Optional.of(new Pair<>(split_key, new_child.getPage().getPageNum()));
+            }
+            sync();
+        }
         return Optional.empty();
     }
 
     // See BPlusNode.remove.
     @Override
     public void remove(DataBox key) {
-        // TODO(proj2): implement
-
-        return;
+        if(keys.contains(key)) {
+            rids.remove(keys.indexOf(key));
+            keys.remove(key);
+            sync();
+        }
     }
 
     // Iterators ///////////////////////////////////////////////////////////////
@@ -379,6 +456,7 @@ class LeafNode extends BPlusNode {
         //STEP 1: FETCH PAGE pageNum FROM BUFFER MANAGER
         Page page = bufferManager.fetchPage(treeContext, pageNum);
 
+
         //STEP 2: GET THE CORRESPONDING BUFFER AFFILIATED WITH THE PAGE
         Buffer buf = page.getBuffer();
 
@@ -390,6 +468,10 @@ class LeafNode extends BPlusNode {
 
         //STEP 4: GET RIGHT NODE VAL
         long rightSib = buf.getLong();
+        Optional<Long > rr = Optional.of(rightSib);
+        if (rightSib == (long) -1) {
+            rr = Optional.empty();
+        }
 
         //STEP 5: GET NUMBER OF (KEY,RID) PAIRS THIS NODE HAS
         int numPairs = buf.getInt();
@@ -398,14 +480,12 @@ class LeafNode extends BPlusNode {
         List<DataBox> keys = new ArrayList<>();
         List<RecordId> rids = new ArrayList<>();
 
-
-        //NOT SURE
         for (int i = 0; i < numPairs; ++i) {
             keys.add(DataBox.fromBytes(buf, metadata.getKeySchema()));
             rids.add(RecordId.fromBytes(buf));
         }
 
-        return new LeafNode(metadata, bufferManager, page, keys, rids, Optional.of(rightSib), treeContext);
+        return new LeafNode(metadata, bufferManager, page, keys, rids, rr, treeContext);
     }
 
     // Builtins ////////////////////////////////////////////////////////////////

@@ -141,6 +141,7 @@ public class TestLeafNode {
             // Leaf should never overflow during the first 2d puts
             assertEquals(Optional.empty(), leaf.put(key, rid));
 
+
             for (int j = 0; j <= i; ++j) {
                 // Test that all RecordIds inserted up to this point are still
                 // present
